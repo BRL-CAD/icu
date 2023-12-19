@@ -12,6 +12,15 @@ on:
       - 'maint/maint*'
   pull_request:
     branches: '**'
+  workflow_dispatch:
+    # To trigger the Env Test workflow manually, follow the instructions in
+    # https://docs.github.com/en/actions/managing-workflow-runs/manually-running-a-workflow
+
+env:
+  SHARED_MVN_ARGS: '--show-version --no-transfer-progress'
+
+permissions:
+  contents: read
 
 jobs:
 
@@ -19,7 +28,7 @@ jobs:
   icu4c-docs-build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: ICU4C doc
         run: |
@@ -30,8 +39,39 @@ jobs:
            # Regex note: (?! ... ) is a negative lookahead. Succeed if the pattern is not present. 
           set +o pipefail && make doc 2>&1 | tee doxygen.log && ( ! grep -P 'warning:(?! .* file .?Doxyfile)' doxygen.log )
 
-  # ICU4J build and unit test using Ant
-  icu4j-ant-build-and-test:
+  # Initialize the Maven artifact cache
+  #
+  # This job is created according to the cache strategy of reuse from a single job:
+  # https://github.com/actions/cache/blob/main/caching-strategies.md#make-cache-read-only--reuse-cache-from-centralized-job
+  icu4j-mvn-init-cache:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout and setup
+        uses: actions/checkout@v3
+        with:
+          lfs: true
+      - name: Checkout lfs objects
+        run: git lfs pull
+      - name: Cache local Maven repository
+        uses: actions/cache@v3
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+      - uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '8'
+      # Download all of the artifacts needed for the code and build plugins, but
+      # exclude any needed by profiles depending on system artifacts
+      - name: Download all artifacts
+        run: |
+          cd icu4j;
+          mvn ${SHARED_MVN_ARGS} dependency:go-offline -P '!old_jdk_taglet'
+          
+  # ICU4J build and unit test using Maven
+  # https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-java-with-maven
+  icu4j-mvn-build-and-test:
+    needs: icu4j-mvn-init-cache
     strategy:
       fail-fast: false
       matrix:
@@ -39,11 +79,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout and setup
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           lfs: true
       - name: Checkout lfs objects
         run: git lfs pull
+      - name: Restore read-only cache of local Maven repository
+        uses: actions/cache/restore@v3
+        id: cache
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
       - uses: actions/setup-java@v3
         with:
           distribution: 'temurin'
@@ -51,85 +99,33 @@ jobs:
       - name: ICU4J
         run: |
           cd icu4j;
-          ant init;
-          ant check;
-          ant localespiCheck
+          mvn ${SHARED_MVN_ARGS} verify
       - name: List failures (if any)
         run: |
-          [ -d icu4j/out/junit-results ] && cd icu4j && cat `find out/junit-results -name "*.txt" -exec grep -l FAILED {} \;`;
+          cd icu4j && cat `find . -name surefire-reports -type d -exec grep -l  -r --include="*.txt" FAILED {} \;`;
         if: ${{ failure() }}
-
-  # ICU4J build and unit tests using Maven
-  # https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-java-with-maven
-
-  # Run `test` to execute unit tests and ensure it is possible for tests to run even without packaging submodule
-  # dependencies as jar files
-  icu4j-test-maven:
-    name: Run unit tests with Maven for Java version
-    runs-on: ubuntu-latest
-    # Make this unit test target job depend on a later phase target job to prevent race condition when
-    # trying to persist the Maven cache to the Github cache, knowing that artifacts needed for
-    # the later phase `verify` are a superset of the artifacts needed for the earlier phase `test`.
-    needs: icu4j-verify-maven
-    strategy:
-      fail-fast: false
-      matrix:
-        java-version: [ '8', '11', '17' ]
-    steps:
-      - name: Checkout and setup
-        uses: actions/checkout@v2
-        with:
-          lfs: true
-      - name: Checkout lfs objects
-        run: git lfs pull
-      - uses: actions/setup-java@v3
-        with:
-          distribution: 'temurin'
-          java-version: ${{ matrix.java-version }}
-          cache: maven
-      - name: Run Maven test
-        run: |
-          cd icu4j/maven-build;
-          mvn --batch-mode test
-
-  # Run `verify` to ensure that `package` (creating .jar files) and `integration-test` (special setup for localespi tests) work
-  icu4j-verify-maven:
-    name: Run integration tests with Maven for Java version
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        java-version: [ '8', '11', '17' ]
-    steps:
-      - name: Checkout and setup
-        uses: actions/checkout@v2
-        with:
-          lfs: true
-      - name: Checkout lfs objects
-        run: git lfs pull
-      - uses: actions/setup-java@v3
-        with:
-          distribution: 'temurin'
-          java-version: ${{ matrix.java-version }}
-          cache: maven
-      # The Maven `verify` phase causes the following to happen first, and in order:
-      # build/compile (`compile`), unit tests (`test`), Jar building (`package`),
-      # integration tests, if any (`integration-test`)
-      - name: Run Maven verify
-        run: |
-          cd icu4j/maven-build;
-          mvn --batch-mode verify
 
   # ICU4J build and unit test under lstm
   lstm-icu4j-build-and-test:
+    if: false  # TODO(ICU-22505)
+    needs: icu4j-mvn-init-cache
     runs-on: ubuntu-latest
     steps:
       - name: Checkout and setup
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           lfs: true
       - name: Checkout lfs objects
         run: git lfs pull
+      - name: Restore read-only cache of local Maven repository
+        uses: actions/cache/restore@v3
+        id: cache
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+          lookup-only: true
       - uses: actions/setup-java@v3
         with:
           distribution: 'temurin'
@@ -139,29 +135,38 @@ jobs:
           cd icu4c/source;
           ICU_DATA_BUILDTOOL_OPTS=--include_uni_core_data ICU_DATA_FILTER_FILE=../../.github/lstm_for_th_my.json ./runConfigureICU --enable-debug --disable-release Linux -disable-layoutex;
           make clean;
-          make -j2 ICU4J_ROOT=../../../icu4j icu4j-data-install;
+          make -j -l2.5 ICU4J_ROOT=../../../icu4j icu4j-data-install;
           cd ../..
       - name: ICU4J
         run: |
           cd icu4j;
-          ant init;
-          ant check;
-          ant localespiCheck
+          mvn ${SHARED_MVN_ARGS} verify
       - name: List failures (if any)
         run: |
-          [ -d icu4j/out/junit-results ] && cd icu4j && cat `find out/junit-results -name "*.txt" -exec grep -l FAILED {} \;`;
+          cd icu4j && cat `find . -name surefire-reports -type d -exec grep -l  -r --include="*.txt" FAILED {} \;`;
         if: ${{ failure() }}
 
   # ICU4J build and unit test under adaboost
   adaboost-icu4j-build-and-test:
+    if: false # Temporary disable, until we disable the .jar creation from C and distribute the individual files
+    needs: icu4j-mvn-init-cache
     runs-on: ubuntu-latest
     steps:
       - name: Checkout and setup
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           lfs: true
       - name: Checkout lfs objects
         run: git lfs pull
+      - name: Restore read-only cache of local Maven repository
+        uses: actions/cache/restore@v3
+        id: cache
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+          lookup-only: true
       - uses: actions/setup-java@v3
         with:
           distribution: 'temurin'
@@ -171,17 +176,15 @@ jobs:
           cd icu4c/source;
           ICU_DATA_BUILDTOOL_OPTS=--include_uni_core_data ICU_DATA_FILTER_FILE=../../.github/adaboost.json CPPFLAGS=-DUCONFIG_USE_ML_PHRASE_BREAKING=1 ./runConfigureICU --enable-debug --disable-release Linux -disable-layoutex;
           make clean;
-          make -j2 ICU4J_ROOT=../../../icu4j icu4j-data-install;
+          make -j -l2.5 ICU4J_ROOT=../../../icu4j icu4j-data-install;
           cd ../..
       - name: ICU4J
         run: |
           cd icu4j;
-          ant init;
-          ant -Dcom.ibm.icu.impl.breakiter.useMLPhraseBreaking=true check;
-          ant localespiCheck
+          mvn ${SHARED_MVN_ARGS} -Dcom.ibm.icu.impl.breakiter.useMLPhraseBreaking=true verify
       - name: List failures (if any)
         run: |
-          [ -d icu4j/out/junit-results ] && cd icu4j && cat `find out/junit-results -name "*.txt" -exec grep -l FAILED {} \;`;
+          cd icu4j && cat `find . -name surefire-reports -type d -exec grep -l  -r --include="*.txt" FAILED {} \;`;
         if: ${{ failure() }}
 
   # gcc debug build.
@@ -196,7 +199,7 @@ jobs:
   gcc-debug-build-and-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: ICU4C with gcc
         env:
@@ -205,8 +208,7 @@ jobs:
           mkdir build;
           cd build;
           ../icu4c/source/runConfigureICU --enable-debug --disable-release Linux/gcc --prefix=$PREFIX --enable-tracing;
-          make -j2;
-          make -j2 check;
+          make -j -l2.5 check;
           ( cd ../icu4c/source/test/depstest && ./depstest.py ../../../../build/ );
           make install;
           PATH=$PREFIX/bin:$PATH make -C test/hdrtst check
@@ -220,28 +222,65 @@ jobs:
   clang-release-build-and-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
-      - name: ICU4C with clang
+      - name: Install doxygen
+        run: |
+          sudo apt-get -y install doxygen;
+      - name: Build ICU4C with clang
         env:
           CPPFLAGS: -DU_NO_DEFAULT_INCLUDE_UTF_HEADERS=1
           CFLAGS: -Wimplicit-fallthrough
           CXXFLAGS: -Wimplicit-fallthrough
         run: |
-          sudo apt-get -y install doxygen;
           cd icu4c/source;
           ./runConfigureICU Linux;
-          make -j 2;
-          make -j 2 check;
-          ( cd test/depstest && python3 depstest.py ../../../source/ );
-          ( cd .. && source/test/hdrtst/testtagsguards.sh );
+          make -j -l2.5 check;
+      - name: Test Dependency
+        run: |
+          cd icu4c/source/test/depstest;
+          python3 depstest.py ../../../source/;
+      - name: Test Tags Guards
+        run: |
+          cd icu4c;
+          source/test/hdrtst/testtagsguards.sh;
+      - name: Make Dist
+        env:
+          CPPFLAGS: -DU_NO_DEFAULT_INCLUDE_UTF_HEADERS=1
+          CFLAGS: -Wimplicit-fallthrough
+          CXXFLAGS: -Wimplicit-fallthrough
+        run: |
+          cd icu4c/source;
           make dist
+
+  # clang build with some options
+  clang-options-build-and-test:
+    strategy:
+      # "fail-fast: false" lets other jobs keep running even if the test breaks in some other options.
+      fail-fast: false
+      matrix:
+        build_option:
+         [ --enable-static, --enable-static --disable-shared ]
+         # --disable-shared has a build problem.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Build ICU4C with clang
+        run: |
+          cd icu4c/source;
+          ./runConfigureICU Linux ${{ matrix.build_option }};
+          make -j -l2.5 tests;
+      - name: Test
+        run: |
+          cd icu4c/source;
+          make check;
 
   # Out of source build with gcc 10, c++14, and extra warnings; executes icuinfo.
   gcc-10-stdlib14:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: ICU4C with gcc 10 and c++14 and extra warnings.
         env:
@@ -253,9 +292,8 @@ jobs:
           mkdir build;
           cd build;
           ../icu4c/source/runConfigureICU Linux --disable-layout --disable-layoutex --prefix=$PREFIX;
-          make -j2;
-          make -j2 check;
-          make install;
+          make -j -l2.5 check;
+          make -j -l2.5 install;
           cd $PREFIX/bin;
           LD_LIBRARY_PATH=../lib ./icuinfo
 
@@ -263,14 +301,13 @@ jobs:
   clang-asan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: ICU4C with clang and asan
         run: |
           cd icu4c/source;
           ./runConfigureICU --enable-debug --disable-release Linux --disable-renaming --enable-tracing;
-          make -j2;
-          make -j2 check
+          make -j -l2.5 check;
         env:
           CPPFLAGS: -fsanitize=address
           LDFLAGS: -fsanitize=address
@@ -278,14 +315,13 @@ jobs:
   clang-ubsan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: ICU4C with clang and ubsan +alignment
         run: |
           cd icu4c/source;
           ./runConfigureICU --enable-debug --disable-release Linux --disable-renaming;
-          make -j2;
-          make -j2 check
+          make -j -l2.5 check;
         env:
           CPPFLAGS: -fsanitize=undefined -fsanitize=alignment -fno-sanitize-recover=undefined,alignment
           CFLAGS: -fsanitize=undefined -fsanitize=alignment -fno-sanitize-recover=undefined,alignment
@@ -294,14 +330,13 @@ jobs:
   clang-cfi:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: ICU4C with clang using CFI
         run: |
           cd icu4c/source;
           ./runConfigureICU Linux --disable-renaming;
-          make -j2;
-          make -j2 check
+          make -j -l2.5 check;
         env:
           CC: clang
           CXX: clang++
@@ -314,15 +349,15 @@ jobs:
   clang-tsan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: ICU4C with clang and tsan
         run: |
           cd icu4c/source;
           ./runConfigureICU --enable-debug --disable-release Linux --disable-renaming
-          make -j2;
-          make -j2 -C test;
-          make -j2 -C test/intltest check
+          make -j -l2.5;
+          make -j -l2.5 -C test;
+          make -j -l2.5 -C test/intltest check
         env:
           INTLTEST_OPTS: utility/MultithreadTest
           CPPFLAGS: -fsanitize=thread
@@ -332,32 +367,32 @@ jobs:
   macos-clang:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: ICU4C with clang on MacOS
         run: |
           cd icu4c/source;
           PYTHON=python3 ./runConfigureICU MacOSX;
-          make -j2 check
+          make -j -l2.5 check
 
   # Run ICU4C tests with stubdata.
   run-with-stubdata:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: ICU4C tests with stubdata
         run: |
           cd icu4c/source;
           ./runConfigureICU Linux;
-          make -j2 check;
+          make -j -l2.5 check;
           rm lib/libicudata.so*;
           cp -P stubdata/libicudata.so* lib;
 
           cd test/cintltst;
           echo 'Running ICU4C cintltst with stubdata.';
           # Note: 'Elapsed Time: ' is printed by makefile upon final success.
-          CINTLTST_OPTS=-w make check 2>&1 | tee stubdata_ctest.log;
+          CINTLTST_OPTS=-w make -j -l2.5 check 2>&1 | tee stubdata_ctest.log;
           if ! grep 'Elapsed Time: ' stubdata_ctest.log
           then
             echo
@@ -371,7 +406,7 @@ jobs:
 
           cd ../intltest;
           echo 'Running ICU4C intltest with stubdata.';
-          INTLTEST_OPTS=-w make check 2>&1 | tee stubdata_intltest.log;
+          INTLTEST_OPTS=-w make -j -l2.5 check 2>&1 | tee stubdata_intltest.log;
           if ! grep 'Elapsed Time: ' stubdata_intltest.log
           then
             echo
@@ -387,85 +422,94 @@ jobs:
   u-charset-is-utf8-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - run: |
           cd icu4c/source;
           ./runConfigureICU Linux CPPFLAGS="-DU_CHARSET_IS_UTF8=1";
-          make -j2 check
+          make -j -l2.5 check
 
   # Test U_OVERRIDE_CXX_ALLOCATION-is-0-test
   u-override-cxx-allocation-is-0-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - run: |
           cd icu4c/source;
           ./runConfigureICU Linux CPPFLAGS="-DU_OVERRIDE_CXX_ALLOCATION=0";
           make clean;
-          make -j2 check
+          make -j -l2.5 check
 
   # Test LSTM
   lstm-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - run: |
           cd icu4c/source;
           ICU_DATA_FILTER_FILE=../../.github/lstm_for_th_my.json ./runConfigureICU --enable-debug --disable-release Linux -disable-layoutex;
           make clean;
-          make -j2 check
+          make -j -l2.5 check
 
   # Test adaboost
   adaboost-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - run: |
           cd icu4c/source;
           ICU_DATA_FILTER_FILE=../../.github/adaboost.json CPPFLAGS=-DUCONFIG_USE_ML_PHRASE_BREAKING=1 ./runConfigureICU --enable-debug --disable-release Linux -disable-layoutex;
           make clean;
-          make -j2 check
+          make -j -l2.5 check
 
   # Build and run testmap
   testmap:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - run: |
           cd icu4c/source;
           ./runConfigureICU Linux;
-          make -j2 check;
+          make -j -l2.5 check;
           CONFIG_FILES=test/testmap/Makefile ./config.status;
           cd test/testmap;
-          make check | grep '*** PASS PASS PASS, test PASSED!!!!!!!!'
+          make -j -l2.5 check | grep '*** PASS PASS PASS, test PASSED!!!!!!!!'
 
   # Copyright scan
   copyright-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - run: perl tools/scripts/cpysearch/cpyscan.pl
 
   # Check compilation of internal headers.
   internal-header-compilation:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - run: cd icu4c/source; test/hdrtst/testinternalheaders.sh
 
   # Check source files for valid UTF-8 and for absence of BOM.
   valid-UTF-8-and-no-BOM-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - run: tools/scripts/icu-file-utf8-check.py
 
   # Verify icu4c release tools buildability.
   icu4c-release-tools:
+    needs: icu4j-mvn-init-cache
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - run: mvn -f tools/release/java/pom.xml package dependency:analyze
+      - uses: actions/checkout@v3
+      - name: Restore read-only cache of local Maven repository
+        uses: actions/cache/restore@v3
+        id: cache
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+      - run: mvn ${SHARED_MVN_ARGS} -f tools/release/java/pom.xml package dependency:analyze
 
   # Run unit tests with UCONFIG_NO_XXX variations.
   uconfig-unit-tests:
@@ -486,13 +530,13 @@ jobs:
          - "-DUCONFIG_NO_FORMATTING=1"
          - "-DUCONFIG_NO_TRANSLITERATION=1"
          - "-DUCONFIG_NO_REGULAR_EXPRESSIONS=1"
-         - "-DUCONFIG_NO_SERVICN=1"
+         - "-DUCONFIG_NO_SERVICE=1"
          - "-DUCONFIG_NO_FILTERED_BREAK_ITERATION=1"
          # Turn on all the options in one test.
-         - "-DUCONFIG_NO_LEGACY_CONVERSION=1 -DUCONFIG_NO_NORMALIZATION=1 -DUCONFIG_NO_BREAK_ITERATION=1 -DUCONFIG_NO_IDNA=1 -DUCONFIG_NO_COLLATION=1 -DUCONFIG_NO_FORMATTING=1 -DUCONFIG_NO_TRANSLITERATION=1 -DUCONFIG_NO_REGULAR_EXPRESSIONS=1 -DUCONFIG_NO_SERVICN=1 -DUCONFIG_NO_FILTERED_BREAK_ITERATION=1"
+         - "-DUCONFIG_NO_LEGACY_CONVERSION=1 -DUCONFIG_NO_NORMALIZATION=1 -DUCONFIG_NO_BREAK_ITERATION=1 -DUCONFIG_NO_IDNA=1 -DUCONFIG_NO_COLLATION=1 -DUCONFIG_NO_FORMATTING=1 -DUCONFIG_NO_TRANSLITERATION=1 -DUCONFIG_NO_REGULAR_EXPRESSIONS=1 -DUCONFIG_NO_SERVICE=1 -DUCONFIG_NO_FILTERED_BREAK_ITERATION=1"
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
       - name: Verify no additional new UCONFIG_NO_xxx added
         run: |
           # Test that we have exactly 12 "#ifndef UCONFIG_NO_" in uconfig.h. If the number changes, we need to also
@@ -511,7 +555,7 @@ jobs:
         run: |
           cd icu4c/source/;
           ./runConfigureICU Linux;
-          make -j2 tests;
+          make -j -l2.5 tests;
 
   # Run header tests with UCONFIG_NO_XXX variations.
   uconfig-header-tests:
@@ -532,13 +576,13 @@ jobs:
          - "-DUCONFIG_NO_FORMATTING=1"
          - "-DUCONFIG_NO_TRANSLITERATION=1"
          - "-DUCONFIG_NO_REGULAR_EXPRESSIONS=1"
-         - "-DUCONFIG_NO_SERVICN=1"
+         - "-DUCONFIG_NO_SERVICE=1"
          - "-DUCONFIG_NO_FILTERED_BREAK_ITERATION=1"
          # Turn on all the options in one test.
-         - "-DUCONFIG_NO_LEGACY_CONVERSION=1 -DUCONFIG_NO_NORMALIZATION=1 -DUCONFIG_NO_BREAK_ITERATION=1 -DUCONFIG_NO_IDNA=1 -DUCONFIG_NO_COLLATION=1 -DUCONFIG_NO_FORMATTING=1 -DUCONFIG_NO_TRANSLITERATION=1 -DUCONFIG_NO_REGULAR_EXPRESSIONS=1 -DUCONFIG_NO_SERVICN=1 -DUCONFIG_NO_FILTERED_BREAK_ITERATION=1"
+         - "-DUCONFIG_NO_LEGACY_CONVERSION=1 -DUCONFIG_NO_NORMALIZATION=1 -DUCONFIG_NO_BREAK_ITERATION=1 -DUCONFIG_NO_IDNA=1 -DUCONFIG_NO_COLLATION=1 -DUCONFIG_NO_FORMATTING=1 -DUCONFIG_NO_TRANSLITERATION=1 -DUCONFIG_NO_REGULAR_EXPRESSIONS=1 -DUCONFIG_NO_SERVICE=1 -DUCONFIG_NO_FILTERED_BREAK_ITERATION=1"
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
       - name: Verify no additional new UCONFIG_NO_xxx added
         run: |
           # Test that we have exactly 12 "#ifndef UCONFIG_NO_" in uconfig.h. If the number changes, we need to also
@@ -555,7 +599,7 @@ jobs:
           cd icu4c/source/;
           mkdir /tmp/icu_cnfg;
           ./runConfigureICU Linux --prefix=/tmp/icu_cnfg;
-          make -j2 install;
+          make -j -l2.5 install;
       - name: Test
         env:
           UCONFIG_NO: ${{ matrix.uconfig_cppflags }}
@@ -567,14 +611,14 @@ jobs:
   unicode-update-tools:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
-    - uses: bazelbuild/setup-bazelisk@v1
+    - uses: actions/checkout@v3
+    - uses: bazelbuild/setup-bazelisk@v2
     - name: Get CI Linux runner VM version
       id: linux-version
       run: |
         echo "LINUX_VERSION=$(grep -F VERSION_ID /etc/os-release | cut -d'"' -f2)" >> $GITHUB_OUTPUT
     - name: Mount bazel cache
-      uses: actions/cache@v2
+      uses: actions/cache@v3
       with:
         path: "~/.cache/bazel"
         key: bazel-${{ runner.os }}-${{ steps.linux-version.outputs.LINUX_VERSION }}
@@ -606,7 +650,7 @@ jobs:
   icu4c-test-samples:
       runs-on: ubuntu-latest
       steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: ICU4C configure and build
         run: |
@@ -631,7 +675,7 @@ jobs:
   icu4c-without-collation-rule-strings:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - name: Install hjson dependency
         run: |
           sudo apt-get install python3-pip
@@ -665,13 +709,13 @@ jobs:
           CINTLTST_OPTS: -w
         run: |
           cd icu4c/source
-          make -j2 check
+          make -j -l2.5 check
   
   # https://unicode-org.github.io/icu/processes/release/tasks/healthy-code.html#test-uconfig_no_conversion
-  icu4c-uconfig-no-version:
+  icu4c-uconfig-no-conversion:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - name: Set UCONFIG_NO_CONVERSION and configure ICU4C
         env:
           UCONFIG_NO_CONVERSION: 1
@@ -681,8 +725,8 @@ jobs:
       - name: Run make for stubdata, common, i18n
         run: |
           cd icu4c/source
-          pushd stubdata && make -j 2 && popd
+          pushd stubdata && make -j -l2.5 && popd
           # Ensure lib directory for output object file exists
           mkdir -p lib
-          pushd common && make -j 2 && popd
-          pushd i18n && make -j 2 && popd
+          pushd common && make -j -l2.5 && popd
+          pushd i18n && make -j -l2.5 && popd
