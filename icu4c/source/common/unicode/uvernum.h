@@ -59,7 +59,7 @@
  *  This value will change in the subsequent releases of ICU
  *  @stable ICU 2.6
  */
-#define U_ICU_VERSION_MINOR_NUM 2
+#define U_ICU_VERSION_MINOR_NUM 1
 
 /** The current ICU patchlevel version as an integer.
  *  This value will change in the subsequent releases of ICU
